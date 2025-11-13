@@ -1,0 +1,33 @@
+{
+    "data": {
+        "path": "data/raw/creditcard.csv",
+        "test_size": 0.2,
+        "random_state": 42
+    },
+    "preprocessing": {
+        "scaler_type": "standard",
+        "handle_imbalance": true,
+        "imbalance_method": "smote"
+    },
+    "classical_model": {
+        "type": "random_forest",
+        "n_estimators": 100,
+        "max_depth": null,
+        "random_state": 42
+    },
+    "quantum_model": {
+        "n_qubits": 4,
+        "backend": "qiskit",
+        "circuit_type": "variational",
+        "epochs": 100,
+        "learning_rate": 0.01
+    },
+    "evaluation": {
+        "false_positive_cost": 1.0,
+        "false_negative_cost": 10.0
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "logs/fraud_detection.log"
+    }
+}

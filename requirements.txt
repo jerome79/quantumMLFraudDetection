@@ -1,0 +1,31 @@
+# Dependencies for Quantum ML Fraud Detection
+
+# Core scientific libraries
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+
+# Imbalanced data handling
+imbalanced-learn>=0.9.0
+
+# Quantum computing libraries (optional)
+qiskit>=0.39.0
+qiskit-machine-learning>=0.5.0
+pennylane>=0.28.0
+
+# Visualization
+matplotlib>=3.4.0
+seaborn>=0.11.0
+
+# Notebook support
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=3.0.0
+
+# Development tools
+black>=22.0.0
+flake8>=4.0.0
+mypy>=0.950
