@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project specific
+data/raw/creditcard.csv
+data/processed/
+models/
+*.pkl
+*.png
+*.jpg
