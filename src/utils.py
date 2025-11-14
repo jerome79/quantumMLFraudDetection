@@ -105,21 +105,5 @@ def format_time(seconds: float) -> str:
         return f"{hours:.2f} hours"
 
 
-def check_dataset_exists(filepath: Path) -> bool:
-    """
-    Check if dataset file exists.
-    
-    Args:
-        filepath: Path to dataset file
-        
-    Returns:
-        True if file exists, False otherwise
-    """
-    exists = filepath.exists()
-    if exists:
-        print(f"✓ Dataset found at {filepath}")
-    else:
-        print(f"✗ Dataset not found at {filepath}")
-        print(f"  Please download the ULB Credit Card Fraud Detection dataset")
-        print(f"  and place it at: {filepath}")
-    return exists
+def result_file(name: str) -> Path:
+    return RESULTS_DIR / name

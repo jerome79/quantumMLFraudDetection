@@ -1,195 +1,136 @@
-"""Training script for Variational Quantum Classifier (VQC)."""
-
+import json
 import numpy as np
-from typing import Tuple
-import pickle
+
 from qiskit import Aer
-from qiskit.circuit.library import ZZFeatureMap, RealAmplitudes
-from qiskit.utils import QuantumInstance
-from qiskit_machine_learning.algorithms import VQC
-from qiskit.algorithms.optimizers import COBYLA
-import config
-from data_loader import load_creditcard_data, get_train_test_split, sample_balanced_dataset
-from preprocessing import prepare_features_labels, preprocess_for_quantum
-from metrics_utils import (
-    calculate_metrics, 
-    print_metrics, 
-    print_confusion_matrix,
-    print_classification_report
+from qiskit.utils import QuantumInstance, algorithm_globals
+from qiskit.circuit.library import ZZFeatureMap, TwoLocal
+from qiskit.opflow import Z, StateFn, CircuitStateFn, AerPauliExpectation, CircuitSampler
+
+from sklearn.model_selection import train_test_split
+
+from .data_loader import load_creditcard_data
+from .preprocessing import time_aware_train_test_split, prepare_features
+from .metrics_utils import compute_metrics, save_metrics
+from .config import (
+    RANDOM_STATE,
+    N_QUBITS,
+    FEATURE_MAP_REPS,
+    ANSATZ_REPS,
 )
+from .utils import result_file
+
+from scipy.optimize import minimize
 
 
-def create_vqc(feature_dim: int = None) -> VQC:
-    """
-    Create a Variational Quantum Classifier.
-    
-    Args:
-        feature_dim: Number of features (qubits)
-        
-    Returns:
-        VQC object
-    """
-    if feature_dim is None:
-        feature_dim = config.FEATURE_DIM
-    
-    # Create feature map (encoding circuit)
-    feature_map = ZZFeatureMap(feature_dimension=feature_dim, reps=2)
-    
-    # Create ansatz (variational circuit)
-    ansatz = RealAmplitudes(num_qubits=feature_dim, reps=3)
-    
-    # Create quantum instance
-    backend = Aer.get_backend(config.QUANTUM_BACKEND)
-    quantum_instance = QuantumInstance(
-        backend, 
-        shots=config.QUANTUM_SHOTS,
-        seed_simulator=config.RANDOM_STATE,
-        seed_transpiler=config.RANDOM_STATE
+def get_qasm_backend():
+    backend = Aer.get_backend("qasm_simulator")
+    return backend
+
+
+def build_vqc_circuit(n_features):
+    feature_map = ZZFeatureMap(
+        feature_dimension=n_features,
+        reps=FEATURE_MAP_REPS,
+        entanglement="full",
     )
-    
-    # Create optimizer
-    optimizer = COBYLA(maxiter=100)
-    
-    # Create VQC
-    vqc = VQC(
-        feature_map=feature_map,
-        ansatz=ansatz,
-        optimizer=optimizer,
-        quantum_instance=quantum_instance
+    ansatz = TwoLocal(
+        rotation_blocks="ry",
+        entanglement_blocks="cz",
+        entanglement="full",
+        reps=ANSATZ_REPS,
     )
-    
-    return vqc
+    return feature_map, ansatz
 
 
-def train_vqc(X_train: np.ndarray, y_train: np.ndarray,
-              feature_dim: int = None) -> VQC:
+def vqc_forward(params, X, feature_map, ansatz, sampler):
     """
-    Train a Variational Quantum Classifier.
-    
-    Args:
-        X_train: Training features
-        y_train: Training labels
-        feature_dim: Number of features (qubits)
-        
-    Returns:
-        Trained VQC model
+    Compute model outputs (probability of class 1) for all samples X.
+    Very simple implementation using expectation of Z on first qubit.
     """
-    if feature_dim is None:
-        feature_dim = config.FEATURE_DIM
-    
-    print(f"Training Variational Quantum Classifier with {feature_dim} qubits...")
-    print("This may take several minutes...")
-    
-    # Create VQC
-    vqc = create_vqc(feature_dim)
-    
-    # Train
-    vqc.fit(X_train, y_train)
-    
-    print("Training complete!")
-    
-    return vqc
+    probs = []
+    for x in X:
+        fm_circ = feature_map.bind_parameters(x)
+        full_circ = fm_circ.compose(ansatz.bind_parameters(params))
+        measurable_expr = StateFn(Z ^ N_QUBITS, is_measurement=True) @ CircuitStateFn(full_circ)
+        expectation = AerPauliExpectation().convert(measurable_expr)
+        value = sampler.convert(expectation).eval().real
+        # Map expectation in [-1,1] to probability [0,1]
+        p1 = (1 - value) / 2.0
+        probs.append(p1)
+    return np.array(probs)
 
 
-def evaluate_vqc(model: VQC, 
-                 X_test: np.ndarray, 
-                 y_test: np.ndarray) -> dict:
-    """
-    Evaluate VQC model on test data.
-    
-    Args:
-        model: Trained VQC model
-        X_test: Test features
-        y_test: Test labels
-        
-    Returns:
-        Dictionary of metrics
-    """
-    print("\nEvaluating VQC model...")
-    y_pred = model.predict(X_test)
-    
-    metrics = calculate_metrics(y_test, y_pred)
-    print_metrics(metrics, "VQC")
-    print_confusion_matrix(y_test, y_pred, "VQC")
-    print_classification_report(y_test, y_pred, "VQC")
-    
-    return metrics
-
-
-def save_model(model: VQC, filepath: str = "vqc_model.pkl"):
-    """
-    Save trained model to disk.
-    
-    Args:
-        model: Trained model
-        filepath: Path to save the model
-    """
-    with open(filepath, 'wb') as f:
-        pickle.dump(model, f)
-    print(f"Model saved to {filepath}")
-
-
-def load_model(filepath: str = "vqc_model.pkl") -> VQC:
-    """
-    Load trained model from disk.
-    
-    Args:
-        filepath: Path to the saved model
-        
-    Returns:
-        Loaded model
-    """
-    with open(filepath, 'rb') as f:
-        model = pickle.load(f)
-    print(f"Model loaded from {filepath}")
-    return model
+def vqc_loss(params, X, y, feature_map, ansatz, sampler, lambda_reg=0.0):
+    y_proba = vqc_forward(params, X, feature_map, ansatz, sampler)
+    eps = 1e-10
+    # Binary cross-entropy
+    loss = -np.mean(y * np.log(y_proba + eps) + (1 - y) * np.log(1 - y_proba + eps))
+    loss += lambda_reg * np.linalg.norm(params) ** 2
+    return loss
 
 
 def main():
-    """Main training pipeline for VQC."""
-    print("=" * 60)
-    print("Variational Quantum Classifier Fraud Detection Training")
-    print("=" * 60)
-    
-    # Load data
-    print("\n1. Loading data...")
+    print("=== Training VQC ===")
+    algorithm_globals.random_seed = RANDOM_STATE
+
     df = load_creditcard_data()
-    
-    # Split data
-    print("\n2. Splitting data...")
-    train_df, test_df = get_train_test_split(df)
-    
-    # Sample balanced subset for quantum training
-    print("\n3. Sampling balanced dataset for quantum model...")
-    train_df_balanced = sample_balanced_dataset(train_df)
-    test_df_balanced = sample_balanced_dataset(test_df, sample_size=1000)
-    
-    # Prepare features and labels
-    print("\n4. Preparing features and labels...")
-    X_train, y_train = prepare_features_labels(train_df_balanced)
-    X_test, y_test = prepare_features_labels(test_df_balanced)
-    
-    # Preprocess for quantum (with PCA)
-    print("\n5. Preprocessing data for quantum model...")
-    X_train_processed, X_test_processed = preprocess_for_quantum(X_train, X_test)
-    
-    # Train model
-    print("\n6. Training quantum model...")
-    model = train_vqc(X_train_processed, y_train)
-    
-    # Evaluate model
-    print("\n7. Evaluating model...")
-    metrics = evaluate_vqc(model, X_test_processed, y_test)
-    
-    # Save model
-    print("\n8. Saving model...")
-    save_model(model, "models/vqc_model.pkl")
-    
-    print("\n" + "=" * 60)
-    print("Training complete!")
-    print("=" * 60)
-    
-    return model, metrics
+    train_df, test_df = time_aware_train_test_split(df)
+    data = prepare_features(train_df, test_df)
+
+    X_train_q = data["X_train_q"]
+    X_test_q = data["X_test_q"]
+    y_train = data["y_train"]
+    y_test = data["y_test"]
+
+    # For speed, we can sub-sample training data (optional)
+    # Here we keep all, but you can sub-sample if needed
+    n_features = X_train_q.shape[1]
+    print("Quantum feature dimension:", n_features)
+
+    backend = get_qasm_backend()
+    qi = QuantumInstance(backend=backend, shots=1024, seed_simulator=RANDOM_STATE, seed_transpiler=RANDOM_STATE)
+    sampler = CircuitSampler(qi)
+
+    feature_map, ansatz = build_vqc_circuit(n_features)
+    num_params = ansatz.num_parameters
+    print("VQC number of parameters:", num_params)
+
+    init_params = 0.01 * (2 * np.random.rand(num_params) - 1)
+
+    # Because the dataset is large, we can use a smaller training subset for VQC
+    # to keep runtime manageable
+    X_train_sub, _, y_train_sub, _ = train_test_split(
+        X_train_q, y_train, test_size=0.8, stratify=y_train, random_state=RANDOM_STATE
+    )
+
+    print(f"VQC training subset size: {X_train_sub.shape[0]}")
+
+    def objective(params):
+        return vqc_loss(params, X_train_sub, y_train_sub, feature_map, ansatz, sampler)
+
+    print("Optimizing VQC parameters...")
+    res = minimize(
+        objective,
+        x0=init_params,
+        method="COBYLA",
+        options={"maxiter": 100, "disp": True},
+    )
+
+    best_params = res.x
+    print("Optimization finished. Final loss:", res.fun)
+
+    # Evaluate on test set
+    y_proba_test = vqc_forward(best_params, X_test_q, feature_map, ansatz, sampler)
+
+    metrics = compute_metrics(y_test, y_proba_test, threshold=0.5)
+    metrics["model_type"] = "vqc"
+    metrics["n_qubits"] = N_QUBITS
+    metrics["feature_map_reps"] = FEATURE_MAP_REPS
+    metrics["ansatz_reps"] = ANSATZ_REPS
+    metrics["selected_features"] = data["selected_feature_names"]
+
+    print(json.dumps(metrics, indent=2))
+    save_metrics(metrics, result_file("vqc_results.json"))
 
 
 if __name__ == "__main__":

@@ -1,148 +1,74 @@
-"""Metrics and evaluation utilities for model performance."""
+import json
+from pathlib import Path
+from typing import Dict
 
 import numpy as np
 from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
     roc_auc_score,
+    average_precision_score,
+    accuracy_score,
+    precision_recall_fscore_support,
+    classification_report,
     confusion_matrix,
-    classification_report
 )
-from typing import Dict, Tuple
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 
-def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+def compute_metrics(y_true: np.ndarray, y_proba: np.ndarray, threshold: float = 0.5) -> Dict:
     """
-    Calculate comprehensive classification metrics.
-    
-    Args:
-        y_true: True labels
-        y_pred: Predicted labels
-        
-    Returns:
-        Dictionary containing various metrics
+    y_proba: probability for positive class (fraud = 1)
     """
-    metrics = {
-        'accuracy': accuracy_score(y_true, y_pred),
-        'precision': precision_score(y_true, y_pred, zero_division=0),
-        'recall': recall_score(y_true, y_pred, zero_division=0),
-        'f1': f1_score(y_true, y_pred, zero_division=0),
-    }
-    
-    # Calculate ROC-AUC if we have both classes
-    if len(np.unique(y_true)) > 1:
-        metrics['roc_auc'] = roc_auc_score(y_true, y_pred)
-    else:
-        metrics['roc_auc'] = 0.0
-    
+    y_pred = (y_proba >= threshold).astype(int)
+
+    metrics = {}
+    # AUROC / AUPRC
+    try:
+        metrics["auroc"] = float(roc_auc_score(y_true, y_proba))
+    except ValueError:
+        metrics["auroc"] = None
+
+    try:
+        metrics["auprc"] = float(average_precision_score(y_true, y_proba))
+    except ValueError:
+        metrics["auprc"] = None
+
+    metrics["accuracy"] = float(accuracy_score(y_true, y_pred))
+
+    # Macro / weighted
+    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="macro", zero_division=0
+    )
+    precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="weighted", zero_division=0
+    )
+
+    metrics["precision_macro"] = float(precision_macro)
+    metrics["recall_macro"] = float(recall_macro)
+    metrics["f1_macro"] = float(f1_macro)
+    metrics["precision_weighted"] = float(precision_weighted)
+    metrics["recall_weighted"] = float(recall_weighted)
+    metrics["f1_weighted"] = float(f1_weighted)
+
+    # Positive class (fraud)
+    precision_pos, recall_pos, f1_pos, support_pos = precision_recall_fscore_support(
+        y_true, y_pred, average=None, labels=[1], zero_division=0
+    )
+    metrics["precision_fraud"] = float(precision_pos[0])
+    metrics["recall_fraud"] = float(recall_pos[0])
+    metrics["f1_fraud"] = float(f1_pos[0])
+    metrics["support_fraud"] = int(support_pos[0])
+
+    # Confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+    metrics["confusion_matrix"] = cm.tolist()
+
+    # Full classification report as string
+    metrics["classification_report"] = classification_report(
+        y_true, y_pred, digits=4, zero_division=0
+    )
+
     return metrics
 
 
-def print_metrics(metrics: Dict[str, float], model_name: str = "Model"):
-    """
-    Print metrics in a formatted way.
-    
-    Args:
-        metrics: Dictionary of metrics
-        model_name: Name of the model for display
-    """
-    print(f"\n{model_name} Performance Metrics:")
-    print("-" * 40)
-    print(f"Accuracy:  {metrics['accuracy']:.4f}")
-    print(f"Precision: {metrics['precision']:.4f}")
-    print(f"Recall:    {metrics['recall']:.4f}")
-    print(f"F1 Score:  {metrics['f1']:.4f}")
-    print(f"ROC-AUC:   {metrics['roc_auc']:.4f}")
-    print("-" * 40)
-
-
-def print_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, 
-                          model_name: str = "Model"):
-    """
-    Print and display confusion matrix.
-    
-    Args:
-        y_true: True labels
-        y_pred: Predicted labels
-        model_name: Name of the model for display
-    """
-    cm = confusion_matrix(y_true, y_pred)
-    
-    print(f"\n{model_name} Confusion Matrix:")
-    print(cm)
-    print(f"\nTrue Negatives:  {cm[0, 0]}")
-    print(f"False Positives: {cm[0, 1]}")
-    print(f"False Negatives: {cm[1, 0]}")
-    print(f"True Positives:  {cm[1, 1]}")
-
-
-def plot_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray,
-                         model_name: str = "Model") -> plt.Figure:
-    """
-    Create a confusion matrix visualization.
-    
-    Args:
-        y_true: True labels
-        y_pred: Predicted labels
-        model_name: Name of the model for display
-        
-    Returns:
-        Matplotlib figure object
-    """
-    cm = confusion_matrix(y_true, y_pred)
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-    ax.set_xlabel('Predicted')
-    ax.set_ylabel('Actual')
-    ax.set_title(f'{model_name} - Confusion Matrix')
-    ax.set_xticklabels(['Non-Fraud', 'Fraud'])
-    ax.set_yticklabels(['Non-Fraud', 'Fraud'])
-    
-    return fig
-
-
-def print_classification_report(y_true: np.ndarray, y_pred: np.ndarray,
-                               model_name: str = "Model"):
-    """
-    Print detailed classification report.
-    
-    Args:
-        y_true: True labels
-        y_pred: Predicted labels
-        model_name: Name of the model for display
-    """
-    print(f"\n{model_name} Classification Report:")
-    print(classification_report(y_true, y_pred, 
-                                target_names=['Non-Fraud', 'Fraud'],
-                                zero_division=0))
-
-
-def compare_models_metrics(metrics_dict: Dict[str, Dict[str, float]]) -> None:
-    """
-    Compare metrics across multiple models.
-    
-    Args:
-        metrics_dict: Dictionary mapping model names to their metrics
-    """
-    print("\nModel Comparison:")
-    print("=" * 80)
-    
-    # Header
-    print(f"{'Model':<20} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1':<12} {'ROC-AUC':<12}")
-    print("-" * 80)
-    
-    # Print each model's metrics
-    for model_name, metrics in metrics_dict.items():
-        print(f"{model_name:<20} "
-              f"{metrics['accuracy']:<12.4f} "
-              f"{metrics['precision']:<12.4f} "
-              f"{metrics['recall']:<12.4f} "
-              f"{metrics['f1']:<12.4f} "
-              f"{metrics['roc_auc']:<12.4f}")
-    
-    print("=" * 80)
+def save_metrics(metrics: Dict, path: Path):
+    with open(path, "w") as f:
+        json.dump(metrics, f, indent=2)
